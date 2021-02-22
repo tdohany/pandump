@@ -14,6 +14,12 @@ import xml.etree.ElementTree as eT
 import argparse
 import getpass
 
+SECURITY_RULES_XPATH = "./devices/entry[@name='localhost.localdomain']" \
+                       "/vsys/entry[@name='vsys1']/rulebase/security/rules"
+DEFAULT_SECURITY_RULES_XPATH = "./predefined/default-security-rules"
+PRE_RULEBASE_XPATH = "panorama/pre-rulebase/security/rules"
+POST_RULEBASE_XPATH = "panorama/post-rulebase/security/rules"
+
 
 def open_file(filename):
     try:
@@ -31,40 +37,48 @@ def make_parser():
     parser.add_argument("-f", "--firewall", help="firewall address")
     parser.add_argument("-t", "--tag", help="firewall tag from the .panrc file", default='')
     parser.add_argument("-o", "--outfile", help="output file", default='')
+    parser.add_argument("-i", "--infile", help="input file, no API used when provided", default='')
     args = parser.parse_args()
-    if args.password == '':
+    if args.password == '' and args.infile == '':
         args.password = getpass.getpass()
     return args
 
 
-def get_local_tree(thisconn):
-    rulebase_xpath = \
-        "/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/rulebase/security/rules"
-    thisconn.get(xpath=rulebase_xpath)
-    tree = eT.fromstring(thisconn.xml_result())
+def get_local_tree(this_input_parameters):
+    if isinstance(this_input_parameters, PanXapi):
+        this_input_parameters.get(xpath=SECURITY_RULES_XPATH)
+        tree = eT.fromstring(this_input_parameters.xml_result())
+    else:
+        tree = eT.parse(this_input_parameters).find(SECURITY_RULES_XPATH)
     return tree
 
 
-def get_shared_tree(thisconn):
-    thisconn.op(cmd="<show><config><pushed-shared-policy></pushed-shared-policy></config></show>")
-    tree = eT.fromstring(thisconn.xml_result())
-    if tree is not unicode:
-        prerules = tree.find('panorama/pre-rulebase/security/rules')
-        postrules = tree.find('panorama/post-rulebase/security/rules')
+def get_shared_tree(this_input_parameters):
+    if isinstance(this_input_parameters, PanXapi):
+        this_input_parameters.op(cmd="<show><config><pushed-shared-policy></pushed-shared-policy></config></show>")
+        tree = eT.fromstring(this_input_parameters.xml_result())
+    else:
+        tree = eT.parse(this_input_parameters)
+    if tree is not bytes:
+        prerules = tree.find(PRE_RULEBASE_XPATH)
+        postrules = tree.find(POST_RULEBASE_XPATH)
         return prerules, postrules
     else:
         return tree
 
 
-def get_predefined_tree(thisconn):
-    rulebase_xpath = "/config/predefined/default-security-rules"
-    thisconn.get(xpath=rulebase_xpath)
-    tree = eT.fromstring(thisconn.xml_result())
+def get_predefined_tree(this_input_parameters):
+    if isinstance(this_input_parameters, PanXapi):
+        this_input_parameters.get(xpath=DEFAULT_SECURITY_RULES_XPATH)
+        tree = eT.fromstring(this_input_parameters.xml_result())
+    else:
+        tree = eT.parse(this_input_parameters).find(DEFAULT_SECURITY_RULES_XPATH)
     return tree
 
-
 def write_security_header(thisfile):
-    thisfile.write(',Name,Tags,Type,Source Zone,Source Address,Source User,Source HIP Profile,Destination Zone,Destination Address,Application,Service,URL Category,Action,Profile,Options,Description\n')
+    thisfile.write(
+        'No,Name,Source Zone,Source Address,Source User,Source HIP Profile,Destination Zone,Destination Address,'
+        'Application,Service,URL Category,Action,Profile,Options,Description,Type,Tags,Disabled\n')
 
 
 def format_members(thislist):
@@ -72,25 +86,13 @@ def format_members(thislist):
     return outlist
 
 
-def write_security_rule(rule, f, rulecount, t):
+def write_security_rule(rule, outputfile, rulecount, ruletype):
     #
     # Process the rule
     #
 
-    # Is the rule disabled?
-    rule_state = rule.find('disabled')
-    if rule_state is None:
-        status = ''
-    else:
-        status = '[Disabled] '
-
     # Get the rule name
     rule_name = rule.get('name')
-
-    # Get the tag members
-    tag = []
-    for tag_iter in rule.iterfind('tag/member'):
-        tag.append(tag_iter.text)
 
     # Get the from_zone members
     from_zone = []
@@ -146,6 +148,14 @@ def write_security_rule(rule, f, rulecount, t):
     # Get the description
     description = rule.find('description')
 
+    # Get the tag members
+    tag = []
+    for tag_iter in rule.iterfind('tag/member'):
+        tag.append(tag_iter.text)
+
+    # Get the disabled state
+    disabled_state = rule.find('disabled')
+
     # Get the profiles or profile group
     av_profile = []
     vuln_profile = []
@@ -171,82 +181,73 @@ def write_security_rule(rule, f, rulecount, t):
     #
 
     # Write the rule count
-    f.write(str(rulecount) + ',')
+    outputfile.write(str(rulecount) + ',')
 
     # Write the rule name
-    f.write(status + rule_name + ',')
-
-    # Write the tag members (if defined)
-    if len(tag) == 0:
-        f.write(status + 'none,')
-    else:
-        f.write(status + format_members(tag) + ',')
-
-    # Write the rule type
-    f.write(status + t + ',')
+    outputfile.write(rule_name + ',')
 
     # Write the from_zone members
-    if t != 'default':
-        f.write(status + format_members(from_zone) + ',')
+    if ruletype != 'default':
+        outputfile.write(format_members(from_zone) + ',')
     else:
-        f.write(status + 'any' + ',')
+        outputfile.write('any' + ',')
 
     # Write the source members
-    if t != 'default':
-        f.write(status + format_members(source) + ',')
+    if ruletype != 'default':
+        outputfile.write(format_members(source) + ',')
     else:
-        f.write(status + 'any' + ',')
+        outputfile.write('any' + ',')
 
     # Write the user members
-    if t != 'default':
-        f.write(status + format_members(user) + ',')
+    if ruletype != 'default':
+        outputfile.write(format_members(user) + ',')
     else:
-        f.write(status + 'any' + ',')
+        outputfile.write('any' + ',')
 
     # Write the HIP profile members
-    if t != 'default':
-        f.write(status + format_members(hip) + ',')
+    if ruletype != 'default':
+        outputfile.write(format_members(hip) + ',')
     else:
-        f.write(status + 'any' + ',')
+        outputfile.write('any' + ',')
 
     # Write the to_zone members
-    if t != 'default':
-        f.write(status + format_members(to_zone) + ',')
+    if ruletype != 'default':
+        outputfile.write(format_members(to_zone) + ',')
     elif rule_name == 'intrazone-default':
-        f.write(status + '(intrazone)' + ',')
+        outputfile.write('(intrazone)' + ',')
     else:
-        f.write(status + 'any' + ',')
+        outputfile.write('any' + ',')
 
     # Write the destination members
-    if t != 'default':
-        f.write(status + format_members(destination) + ',')
+    if ruletype != 'default':
+        outputfile.write(format_members(destination) + ',')
     else:
-        f.write(status + 'any' + ',')
+        outputfile.write('any' + ',')
 
     # Write the application members
-    if t != 'default':
-        f.write(status + format_members(application) + ',')
+    if ruletype != 'default':
+        outputfile.write(format_members(application) + ',')
     else:
-        f.write(status + 'any' + ',')
+        outputfile.write('any' + ',')
 
     # Write the service members
-    if t != 'default':
-        f.write(status + format_members(service) + ',')
+    if ruletype != 'default':
+        outputfile.write(format_members(service) + ',')
     else:
-        f.write(status + 'any' + ',')
+        outputfile.write('any' + ',')
 
     # Write the category members
-    if t != 'default':
-        f.write(status + format_members(category) + ',')
+    if ruletype != 'default':
+        outputfile.write(format_members(category) + ',')
     else:
-        f.write(status + 'any' + ',')
+        outputfile.write('any' + ',')
 
     # Write the action
-    f.write(status + action.text + ',')
+    outputfile.write(action.text + ',')
 
     # Write the profile or group
     if rule.find('profile-setting/group'):
-        f.write(status + profile_group.text)
+        outputfile.write(profile_group.text)
     elif rule.find('profile-setting/profiles'):
         profile_list = []
         if av_profile is not None:
@@ -263,38 +264,63 @@ def write_security_rule(rule, f, rulecount, t):
             profile_list.append('File Blocking: ' + file_profile.text)
         if wildfire_profile is not None:
             profile_list.append('WildFire Analysis: ' + wildfire_profile.text)
-        f.write(status + format_members(profile_list))
+        outputfile.write(format_members(profile_list))
     else:
-        f.write('none')
-    f.write(',')
+        outputfile.write('none')
+    outputfile.write(',')
 
     # Write the log forwarding profile (if defined)
     if log_setting is None:
-        f.write(status + 'none,')
+        outputfile.write('none,')
     else:
-        f.write(status + log_setting.text + ',')
+        outputfile.write(log_setting.text + ',')
 
     # Write the description (if defined)
     if description is None:
-        f.write(status + 'none,')
+        outputfile.write('none,')
     else:
-        f.write(status + description.text)
+        outputfile.write(description.text)
+
+    # Write the rule type
+    outputfile.write(ruletype + ',')
+
+    # Write the tag members (if defined)
+    if len(tag) == 0:
+        outputfile.write('none,')
+    else:
+        outputfile.write(format_members(tag) + ',')
+
+    # Write the Disabled status (if defined)
+    if disabled_state is None:
+        outputfile.write('none,')
+    else:
+        outputfile.write(disabled_state.text + ',')
 
     # Finish it!
-    f.write('\n')
+    outputfile.write('\n')
 
 
 def main():
     # Grab the args
     myargs = make_parser()
-
-    # Open a firewall API connection
-    if myargs.tag:
-        # Use the .panrc API key
-        myconn = PanXapi(tag=myargs.tag)
+    if myargs.infile == '':
+        # Open a firewall API connection
+        if myargs.tag:
+            # Use the .panrc API key
+            my_input_parameters = PanXapi(tag=myargs.tag)
+        else:
+            # Generate the API key
+            my_input_parameters = PanXapi(api_username=myargs.username, api_password=myargs.password, hostname=myargs.firewall)
     else:
-        # Generate the API key
-        myconn = PanXapi(api_username=myargs.username, api_password=myargs.password, hostname=myargs.firewall)
+        my_input_parameters = myargs.infile
+        # Try to open the input file
+        try:
+            with open(my_input_parameters) as f:
+                pass
+        except IOError:
+            print("Input file not accessible.")
+            exit(1)
+
 
     # Open the output file
     if myargs.outfile:
@@ -302,14 +328,15 @@ def main():
     else:
         outfile = sys.stdout
 
+
     # Grab the local rulebase XML tree
-    localtree = get_local_tree(myconn)
+    localtree = get_local_tree(my_input_parameters)
 
     # Grab the shared rulebase XML tree
-    sharedtree = get_shared_tree(myconn)
+    sharedtree = get_shared_tree(my_input_parameters)
 
     # Grab the predfined rulebase XML tree
-    predefinedtree = get_predefined_tree(myconn)
+    predefinedtree = get_predefined_tree(my_input_parameters)
 
     # Write the HTML table
     write_security_header(outfile)
@@ -322,28 +349,30 @@ def main():
     # Process the pre-rules rules
     if sharedtree is not None and sharedtree[0]:
         for prerule in sharedtree[0].iter('entry'):
-            rule_type='pre'
+            rule_type = 'pre'
             write_security_rule(prerule, outfile, count, rule_type)
             count += 1
 
     # Process the local security rules
-    for rule in localtree.iter('entry'):
-        rule_type='local'
-        write_security_rule(rule, outfile, count, rule_type)
-        count += 1
+    if localtree is not None:
+        for rule in localtree.iter('entry'):
+            rule_type = 'local'
+            write_security_rule(rule, outfile, count, rule_type)
+            count += 1
 
     # Process the post-rules
     if sharedtree is not None and sharedtree[1]:
         for postrule in sharedtree[1].iter('entry'):
-            rule_type='post'
+            rule_type = 'post'
             write_security_rule(postrule, outfile, count, rule_type)
             count += 1
 
     # Process the predefined rules
-    for predefinedrule in predefinedtree.iter('entry'):
-        rule_type='default'
-        write_security_rule(predefinedrule, outfile, count, rule_type)
-        count += 1
+    if predefinedtree is not None:
+        for predefinedrule in predefinedtree.iter('entry'):
+            rule_type = 'default'
+            write_security_rule(predefinedrule, outfile, count, rule_type)
+            count += 1
 
     # Close the output file
     if outfile is not sys.stdout:
